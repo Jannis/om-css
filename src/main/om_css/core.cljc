@@ -26,6 +26,72 @@
    (def css (atom {})))
 
 #?(:clj
+   (declare reshape-sablono))
+
+#?(:clj
+   (defn reshape-sablono-tag [tag component-info]
+     ;;(println "reshape-sablono-tag" tag component-info)
+     (let [[tag-name & classes] (string/split (name tag) #"\.")
+           prefixed-classes     (mapv #(utils/format-class-name
+                                            % component-info)
+                                          classes)]
+       (keyword (string/join "." (into [tag-name] prefixed-classes))))))
+
+#?(:clj
+   (defn reshape-sablono-props [props component-info]
+     ;;(println "reshape-sablono-props" props component-info)
+     (let [class (:class props)]
+       (cond-> props
+         (or (string? class)
+             (keyword? class))
+         (update :class #(utils/format-class-name
+                          (name %) component-info))
+
+         (or (vector? class))
+         (update :class (fn [classes]
+                          (map #(utils/format-class-name
+                                 (name %) component-info)
+                               classes)))))))
+
+#?(:clj
+   (defn reshape-sablono-html [form component-info classes-seen]
+     ;;(println "reshape-sablono-html" form component-info)
+     (let [[tag &
+             props-and-children]  form
+           reshaped-tag           (reshape-sablono-tag tag
+                                                       component-info)
+           has-props?             (map? (first props-and-children))
+           props                  (when has-props?
+                                    (first props-and-children))
+           children               (cond-> props-and-children
+                                    has-props? rest)
+           reshaped-props         (when has-props?
+                                    (reshape-sablono-props
+                                     props component-info))
+           reshaped-children      (for [child children]
+                                    (reshape-sablono component-info
+                                                     child
+                                                     classes-seen))]
+       (cond-> [reshaped-tag]
+         has-props? (conj reshaped-props)
+         true       (into reshaped-children)))))
+
+#?(:clj
+   (defn reshape-sablono-seq
+     [form component-info classes-seen]
+     (for [x form]
+       (reshape-sablono x component-info classes-seen))))
+
+#?(:clj
+   (defn reshape-sablono [form component-info classes-seen]
+     (cond
+       (vector? form) (reshape-sablono-html form component-info
+                                            classes-seen)
+       (seq? form)    (reshape-sablono-seq form component-info
+                                           classes-seen)
+       :else          form)))
+
+#?(:clj
    (defn reshape-props [props component-info classes-seen]
      (cond
        (map? props)
@@ -53,34 +119,38 @@
 #?(:clj
    (defn reshape-render
      [form component-info classes-seen]
+     ;;(println "FORM" form)
      (loop [dt (seq form) ret []]
        (if dt
          (let [form (first dt)]
+           ;;(println "  form" form)
            (if (and (sequential? form) (not (empty? form)))
-             (let [[[sym props :as pre] post] (split-at 2 form)
-                   coll-fn? (some #{(-> (str sym)
-                                      (string/split #"-")
-                                      first
-                                      symbol)}
-                              ;; TODO: does this need to be hardcoded?
-                              ['map 'keep 'run! 'reduce 'filter 'mapcat])
-                   props' (if (and coll-fn? (sequential? props))
-                            (reshape-render props component-info classes-seen)
-                            (reshape-props props component-info classes-seen))
-                   props-omitted? (and (sequential? props)
-                                       (symbol? (first props))
-                                       (some #{(symbol (name (first props)))} dom/all-tags))
-                   pre' (if (and (= (count pre) 2)
-                                 (not props-omitted?))
-                          (list sym props')
-                          (list sym))
-                   post (cond->> post
-                          props-omitted? (cons props'))]
-               (recur (next dt)
-                 (into ret
-                   [(cond->> (concat pre'
-                               (reshape-render post component-info classes-seen))
-                      (vector? form) (into []))])))
+             (if (= 'html (first form))
+               (reshape-sablono form component-info classes-seen)
+               (let [[[sym props :as pre] post] (split-at 2 form)
+                     coll-fn? (some #{(-> (str sym)
+                                          (string/split #"-")
+                                          first
+                                          symbol)}
+                                    ;; TODO: does this need to be hardcoded?
+                                    ['map 'keep 'run! 'reduce 'filter 'mapcat])
+                     props' (if (and coll-fn? (sequential? props))
+                              (reshape-render props component-info classes-seen)
+                              (reshape-props props component-info classes-seen))
+                     props-omitted? (and (sequential? props)
+                                         (symbol? (first props))
+                                         (some #{(symbol (name (first props)))} dom/all-tags))
+                     pre' (if (and (= (count pre) 2)
+                                   (not props-omitted?))
+                            (list sym props')
+                            (list sym))
+                     post (cond->> post
+                            props-omitted? (cons props'))]
+                 (recur (next dt)
+                        (into ret
+                              [(cond->> (concat pre'
+                                                (reshape-render post component-info classes-seen))
+                                 (vector? form) (into []))]))))
              (recur (next dt) (into ret [form]))))
          (seq ret)))))
 
